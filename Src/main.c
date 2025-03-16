@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -47,41 +46,19 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+DMA_HandleTypeDef hdma_i2c1_rx;
+DMA_HandleTypeDef hdma_i2c1_tx;
+
 SPI_HandleTypeDef hspi2;
 DMA_HandleTypeDef hdma_spi2_rx;
 DMA_HandleTypeDef hdma_spi2_tx;
 
 UART_HandleTypeDef huart4;
+UART_HandleTypeDef huart5;
+UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_uart4_rx;
 
-/* Definitions for AccelTask */
-osThreadId_t AccelTaskHandle;
-const osThreadAttr_t AccelTask_attributes = {
-  .name = "AccelTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-/* Definitions for BaroTask */
-osThreadId_t BaroTaskHandle;
-const osThreadAttr_t BaroTask_attributes = {
-  .name = "BaroTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal1,
-};
-/* Definitions for GPSTask */
-osThreadId_t GPSTaskHandle;
-const osThreadAttr_t GPSTask_attributes = {
-  .name = "GPSTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal,
-};
-/* Definitions for KalmanTask */
-osThreadId_t KalmanTaskHandle;
-const osThreadAttr_t KalmanTask_attributes = {
-  .name = "KalmanTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
-};
 /* USER CODE BEGIN PV */
 /* Global data buffers for sensor readings */
 volatile float g_accelZ = 0.0f;  // ADXL345 vertical accel minus gravity
@@ -92,12 +69,17 @@ volatile float g_gpsVel  = 0.0f; // NEO-6M vertical velocity (if available)
 /* For DMA-based UART4 RX, store NMEA data here */
 #define GPS_RX_BUFFER_SIZE 128
 uint8_t gpsRxBuffer[GPS_RX_BUFFER_SIZE];
+
+#define UART_BUFFER_SIZE 128
+char uartBuffer[UART_BUFFER_SIZE];
 /* We'll parse the NMEA in the GPSTask */
 
 /* Kalman filter state variables */
 float kf_alt = 0.0f;   // altitude estimate
 float kf_vel = 0.0f;   // velocity estimate
+static float P[2][2] = {{10.0f, 0.0f},{0.0f,10.0f}};
 /* Covariance matrix P, or additional states if needed. For brevity, we keep it simple. */
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -106,11 +88,9 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_UART4_Init(void);
-void StartAccelTask(void *argument);
-void StartBaroTask(void *argument);
-void StartGPSTask(void *argument);
-void StartKalmanTask(void *argument);
-
+static void MX_UART5_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void Kalman_Predict(float dt, float accel);
 void Kalman_Update_Alt(float z_meas, float R);
@@ -119,7 +99,9 @@ void Kalman_Update_Vel(float z_meas, float R);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+void UART_Debug_Print(const char *message) {
+    HAL_UART_Transmit(&huart2, (uint8_t*)message, strlen(message), HAL_MAX_DELAY);
+}
 /* USER CODE END 0 */
 
 /**
@@ -130,6 +112,8 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+	/* Initialize Sensors */
+
 
   /* USER CODE END 1 */
 
@@ -154,59 +138,77 @@ int main(void)
   MX_DMA_Init();
   MX_SPI2_Init();
   MX_UART4_Init();
+  MX_UART5_Init();
+  MX_I2C1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  ADXL345_Init(&hspi2, ADXL345_CS_GPIO_Port, ADXL345_CS_Pin);
+  	    DPS310_Init(&hspi2, DSP310_CS_GPIO_Port, DSP310_CS_Pin);
+  	    HAL_UART_Receive_DMA(&huart4, gpsRxBuffer, GPS_RX_BUFFER_SIZE);
 
+  	    float previousAccel = 0.0f;
+  	    uint32_t prevTick = HAL_GetTick();
+
+  	  // Debug: Show UART is working
+  	      UART_Debug_Print("Hi, I am working...\r\n");
   /* USER CODE END 2 */
-
-  /* Init scheduler */
-  osKernelInitialize();
-
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
-  /* USER CODE END RTOS_SEMAPHORES */
-
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
-  /* USER CODE END RTOS_TIMERS */
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
-
-  /* Create the thread(s) */
-  /* creation of AccelTask */
-  AccelTaskHandle = osThreadNew(StartAccelTask, NULL, &AccelTask_attributes);
-
-  /* creation of BaroTask */
-  BaroTaskHandle = osThreadNew(StartBaroTask, NULL, &BaroTask_attributes);
-
-  /* creation of GPSTask */
-  GPSTaskHandle = osThreadNew(StartGPSTask, NULL, &GPSTask_attributes);
-
-  /* creation of KalmanTask */
-  KalmanTaskHandle = osThreadNew(StartKalmanTask, NULL, &KalmanTask_attributes);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
-  /* USER CODE END RTOS_THREADS */
-
-  /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
-  /* USER CODE END RTOS_EVENTS */
-
-  /* Start scheduler */
-  osKernelStart();
-
-  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	      /* Compute dt in seconds */
+	          uint32_t nowTick = HAL_GetTick();
+	          float dt = (nowTick - prevTick) / 1000.0f;
+	          prevTick = nowTick;
+
+	          /* Read Acceleration */
+	          float accelData[3];
+	          ADXL345_ReadAccel(accelData);
+	          float rawZ_ms2 = accelData[2] * 9.81f;
+	          g_accelZ = rawZ_ms2 - 9.81f;  // Remove gravity effect
+
+	          /* Read Barometric Altitude */
+	          g_baroAlt = DPS310_ReadAltitude();
+
+	          /* Read GPS Data */
+	          if (GPS_CheckForNewSentence(gpsRxBuffer)) {
+	              GPS_Data_t gpsData;
+	              if (GPS_ParseNMEA(gpsRxBuffer, &gpsData)) {
+	                  g_gpsAlt = gpsData.altitude;
+	                  g_gpsVel = gpsData.verticalVel;
+	              }
+	          }
+
+	          /* Debug: Print Sensor Readings */
+	          char buffer[200];
+	          sprintf(buffer, "Accel: %.2f m/s² | Baro Alt: %.2f m | GPS Alt: %.2f m | GPS Vel: %.2f m/s\r\n",
+	                  g_accelZ, g_baroAlt, g_gpsAlt, g_gpsVel);
+	          UART_Debug_Print(buffer);
+
+	          /* Kalman Prediction */
+	          float currentAccel = g_accelZ;
+	          float avgAccel = 0.5f * (previousAccel + currentAccel);
+	          previousAccel = currentAccel;
+	          Kalman_Predict(dt, avgAccel);
+
+	          /* Kalman Updates */
+	          Kalman_Update_Alt(g_baroAlt, 1.0f);
+	          Kalman_Update_Alt(g_gpsAlt, 4.0f);
+	          Kalman_Update_Vel(g_gpsVel, 0.25f);
+
+	          /* Debug: Print Kalman Filter Values */
+	          sprintf(buffer, "KF Alt: %.2f m | KF Vel: %.2f m/s\r\n", kf_alt, kf_vel);
+	          UART_Debug_Print(buffer);
+
+	          /* Apogee Detection */
+	          static float lastVel = 0.0f;
+	          if (lastVel > 0.0f && kf_vel < 0.0f) {
+	              UART_Debug_Print("🚀 Apogee Detected! 🚀\r\n");
+	          }
+	          lastVel = kf_vel;
+
+	          HAL_Delay(500);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -261,6 +263,40 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief SPI2 Initialization Function
   * @param None
   * @retval None
@@ -307,7 +343,8 @@ static void MX_UART4_Init(void)
 {
 
   /* USER CODE BEGIN UART4_Init 0 */
-
+	char testMsg[] = "Initializing UART5...\r\n";
+	    HAL_UART_Transmit(&huart5, (uint8_t*)testMsg, strlen(testMsg), HAL_MAX_DELAY);
   /* USER CODE END UART4_Init 0 */
 
   /* USER CODE BEGIN UART4_Init 1 */
@@ -332,6 +369,72 @@ static void MX_UART4_Init(void)
 }
 
 /**
+  * @brief UART5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART5_Init(void)
+{
+
+  /* USER CODE BEGIN UART5_Init 0 */
+
+  /* USER CODE END UART5_Init 0 */
+
+  /* USER CODE BEGIN UART5_Init 1 */
+
+  /* USER CODE END UART5_Init 1 */
+  huart5.Instance = UART5;
+  huart5.Init.BaudRate = 9600;
+  huart5.Init.WordLength = UART_WORDLENGTH_8B;
+  huart5.Init.StopBits = UART_STOPBITS_1;
+  huart5.Init.Parity = UART_PARITY_NONE;
+  huart5.Init.Mode = UART_MODE_TX_RX;
+  huart5.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart5.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART5_Init 2 */
+
+  /* USER CODE END UART5_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 9600;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -341,15 +444,21 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
   /* DMA1_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
   /* DMA1_Stream3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
   /* DMA1_Stream4_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
 
@@ -369,12 +478,23 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(ADXL345_CS_GPIO_Port, ADXL345_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DSP310_CS_GPIO_Port, DSP310_CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : LD2_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : ADXL345_CS_Pin */
   GPIO_InitStruct.Pin = ADXL345_CS_Pin;
@@ -397,7 +517,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 /*---------------- KALMAN FILTER IMPLEMENTATION (2D: alt, vel) -----------------*/
 /* Simple version with minimal error checking. Expand with covariance P, etc. */
-static float P[2][2] = {{10.0f, 0.0f},{0.0f,10.0f}}; // example initial covariance
+
 
 void Kalman_Predict(float dt, float accel)
 {
@@ -481,151 +601,6 @@ void Kalman_Update_Vel(float z_meas, float R)
 }
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartAccelTask */
-/**
-  * @brief  Function implementing the AccelTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartAccelTask */
-void StartAccelTask(void *argument)
-{
-  /* USER CODE BEGIN 5 */
-	ADXL345_Init(&hspi2, ADXL345_CS_GPIO_Port, ADXL345_CS_Pin);
-  /* Infinite loop */
-  for(;;)
-  {
-	  /* Read raw acceleration (X,Y,Z) in g. Typically ADXL345_ReadAccel returns float array. */
-	      float accelData[3];
-	      ADXL345_ReadAccel(accelData);  // user-implemented driver function
-
-	      /* We assume rocket is mostly vertical, so let's pick Z as the vertical axis.
-	         Subtract 1g (9.81 m/s^2) to get net acceleration. If ADXL345 driver returns g, multiply by 9.81 if needed. */
-	      float rawZ_g = accelData[2];
-	      float rawZ_ms2 = rawZ_g * 9.81f;
-	      g_accelZ = rawZ_ms2 - 9.81f;  // net rocket acceleration (Trapezoidal integration used in the Kalman)
-
-	      osDelay(5);
-  }
-  /* USER CODE END 5 */
-}
-
-/* USER CODE BEGIN Header_StartBaroTask */
-/**
-* @brief Function implementing the BaroTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartBaroTask */
-void StartBaroTask(void *argument)
-{
-  /* USER CODE BEGIN StartBaroTask */
-	DPS310_Init(&hspi2, DSP310_CS_GPIO_Port, DSP310_CS_Pin);
-  /* Infinite loop */
-  for(;;)
-  {
-	  /* Read altitude from DPS310 in meters (the driver does pressure->alt conversion). */
-	      g_baroAlt = DPS310_ReadAltitude();
-
-	      osDelay(10); // ~100 Hz
-  }
-  /* USER CODE END StartBaroTask */
-}
-
-/* USER CODE BEGIN Header_StartGPSTask */
-/**
-* @brief Function implementing the GPSTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartGPSTask */
-void StartGPSTask(void *argument)
-{
-  /* USER CODE BEGIN StartGPSTask */
-	HAL_UART_Receive_DMA(&huart4, gpsRxBuffer, GPS_RX_BUFFER_SIZE);
-  /* Infinite loop */
-  for(;;)
-  {
-	  /* Check if we have a new NMEA sentence in gpsRxBuffer.
-	         A typical approach is to watch for '$' or '\n' and parse.
-	         The user can implement a ring buffer or simpler approach. */
-
-	      /* Pseudocode parse example: */
-	      if(GPS_CheckForNewSentence(gpsRxBuffer))
-	      {
-	        GPS_Data_t gpsData;
-	        if(GPS_ParseNMEA(gpsRxBuffer, &gpsData)) // fill gpsData with lat, lon, alt, velocity, etc.
-	        {
-	          g_gpsAlt = gpsData.altitude;    // in meters
-	          g_gpsVel = gpsData.verticalVel; // if available, otherwise 0
-	        }
-	        // Clear or shift buffer as needed
-	      }
-
-	      osDelay(200); // parse at 5 Hz or so
-  }
-  /* USER CODE END StartGPSTask */
-}
-
-/* USER CODE BEGIN Header_StartKalmanTask */
-/**
-* @brief Function implementing the KalmanTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartKalmanTask */
-void StartKalmanTask(void *argument)
-{
-  /* USER CODE BEGIN StartKalmanTask */
-	/* Kalman filter initialization */
-	  kf_alt = 0.0f;
-	  kf_vel = 0.0f;
-	  // P matrix, etc. can be set to some initial guess
-
-	  float previousAccel = 0.0f; // for trapezoidal integration
-	  uint32_t prevTick = osKernelGetTickCount();
-  /* Infinite loop */
-  for(;;)
-  {
-	  /* 1) Compute dt in seconds */
-	      uint32_t nowTick = osKernelGetTickCount();
-	      float dt = (nowTick - prevTick) / 1000.0f;
-	      prevTick = nowTick;
-
-	      /* 2) Prediction step: trapezoidal integration for acceleration */
-	      float currentAccel = g_accelZ; // net rocket accel in m/s^2
-	      float avgAccel = 0.5f * (previousAccel + currentAccel);
-	      previousAccel = currentAccel;
-
-	      Kalman_Predict(dt, avgAccel);
-
-	      /* 3) Barometric update if new baro reading is available.
-	            We'll do a simplistic approach: always update with g_baroAlt. */
-	      float R_baro = 1.0f; // noise variance for baro altitude (approx)
-	      Kalman_Update_Alt(g_baroAlt, R_baro);
-
-	      /* 4) GPS update if new data is available. For simplicity, assume always. */
-	      float R_gpsAlt = 4.0f; // GPS altitude variance ~2m RMS => 4 m^2
-	      Kalman_Update_Alt(g_gpsAlt, R_gpsAlt);
-
-	      /* If GPS velocity is reliable, we can also update velocity: */
-	      float R_gpsVel = 0.25f; // e.g. 0.5 m/s RMS => 0.25 m^2
-	      Kalman_Update_Vel(g_gpsVel, R_gpsVel);
-
-	      /* 5) Check for apogee: if velocity crosses from positive to negative */
-	      static float lastVel = 0.0f;
-	      if(lastVel > 0.0f && kf_vel < 0.0f)
-	      {
-	        // Apogee event triggered
-	        // Could deploy parachute or set a flag
-	      }
-	      lastVel = kf_vel;
-
-	      osDelay(10);
-  }
-  /* USER CODE END StartKalmanTask */
-}
-
 /**
   * @brief  Period elapsed callback in non blocking mode
   * @note   This function is called  when TIM6 interrupt took place, inside
@@ -659,6 +634,7 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
+
   }
   /* USER CODE END Error_Handler_Debug */
 }
